@@ -9,15 +9,17 @@
  */
 
 use worker::*;
+use futures_util::StreamExt;
 
 const CHUNK_SIZE: usize = 16 * 1024; // 16KB chunks
 
 fn cors_headers(resp: Response) -> Response {
-    let mut headers = Headers::new();
-    let _ = headers.set("Access-Control-Allow-Origin", "*");
-    let _ = headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    let _ = headers.set("Access-Control-Allow-Headers", "Content-Type, Upgrade");
-    resp.with_headers(headers)
+    let headers = Headers::new();
+    let mut resp = resp.with_headers(headers);
+    let _ = resp.headers_mut().set("Access-Control-Allow-Origin", "*");
+    let _ = resp.headers_mut().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    let _ = resp.headers_mut().set("Access-Control-Allow-Headers", "Content-Type, Upgrade");
+    resp
 }
 
 #[event(fetch)]
@@ -70,11 +72,12 @@ async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
         }
         
         let resp = Response::from_bytes(key_data)?;
-        let mut headers = Headers::new();
-        headers.set("Content-Type", "application/octet-stream")?;
-        headers.set("Access-Control-Allow-Origin", "*")?;
+        let headers = Headers::new();
+        let mut resp = resp.with_headers(headers);
+        let _ = resp.headers_mut().set("Content-Type", "application/octet-stream");
+        let _ = resp.headers_mut().set("Access-Control-Allow-Origin", "*");
         
-        return Ok(resp.with_headers(headers));
+        return Ok(resp);
     }
 
     // Route: /health
@@ -86,36 +89,28 @@ async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 }
 
 async fn handle_websocket(ws: WebSocket) {
-    // Simple message loop
-    loop {
-        match ws.events() {
-            Ok(mut events) => {
-                while let Some(event) = events.next().await {
-                    match event {
-                        Ok(WebsocketEvent::Message(msg)) => {
-                            if let Some(text) = msg.text() {
-                                // Handle ping
-                                if text == "ping" {
-                                    let _ = ws.send_with_str("pong");
-                                    continue;
-                                }
-                                
-                                // Parse request: {"type":"request_key","count":100}
-                                if let Ok(req) = serde_json::from_str::<KeyRequest>(&text) {
-                                    if req.request_type == "request_key" {
-                                        send_key_chunks(&ws, req.count).await;
-                                    }
-                                }
-                            }
-                        }
-                        Ok(WebsocketEvent::Close(_)) => {
-                            return;
-                        }
-                        Err(_) => {
-                            return;
+    let mut events = ws.events().expect("Failed to get event stream");
+    
+    while let Some(event) = events.next().await {
+        match event {
+            Ok(WebsocketEvent::Message(msg)) => {
+                if let Some(text) = msg.text() {
+                    // Handle ping
+                    if text == "ping" {
+                        let _ = ws.send_with_str("pong");
+                        continue;
+                    }
+                    
+                    // Parse request: {"type":"request_key","count":100}
+                    if let Ok(req) = serde_json::from_str::<KeyRequest>(&text) {
+                        if req.request_type == "request_key" {
+                            send_key_chunks(&ws, req.count).await;
                         }
                     }
                 }
+            }
+            Ok(WebsocketEvent::Close(_)) => {
+                return;
             }
             Err(_) => {
                 return;
