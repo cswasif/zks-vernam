@@ -1,17 +1,14 @@
 /**
- * ZKS Vernam Worker - Split-Key One-Time Pad Generator
+ * ZKS Vernam Worker - Stateless Random Key Generator
  * 
  * Generates cryptographically secure random keys for Vernam cipher.
- * Uses WebSocket streaming for real-time key delivery.
+ * Returns key chunks via HTTP response (no Durable Objects needed).
  * 
- * SECURITY: Worker only knows keyB. Client knows keyA.
+ * SECURITY: Worker generates keyB, Client generates keyA.
  * Neither alone can decrypt. Only the recipient with both keys can.
  */
 
 use worker::*;
-
-mod vernam_session;
-use vernam_session::VernamSession;
 
 fn cors_headers(resp: Response) -> Response {
     let mut headers = Headers::new();
@@ -21,8 +18,10 @@ fn cors_headers(resp: Response) -> Response {
     resp.with_headers(headers)
 }
 
+const CHUNK_SIZE: usize = 16 * 1024; // 16KB chunks
+
 #[event(fetch)]
-async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn main(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
 
@@ -34,21 +33,31 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return Ok(cors_headers(Response::empty()?));
     }
 
-    // Route: /ws/key/:session_id - WebSocket for key streaming
-    if path.starts_with("/ws/key/") {
-        let session_id = path.trim_start_matches("/ws/key/").to_string();
+    // Route: /key/:chunk_count - Generate random key chunks
+    if path.starts_with("/key/") {
+        let chunk_count_str = path.trim_start_matches("/key/");
+        let chunk_count: usize = chunk_count_str.parse().unwrap_or(1);
         
-        if session_id.is_empty() {
-            return Ok(cors_headers(Response::error("Missing session_id", 400)?));
-        }
-
-        // Get or create Durable Object for this session
-        let namespace = env.durable_object("VERNAM_SESSION")?;
-        let id = namespace.id_from_name(&session_id)?;
-        let stub = id.get_stub()?;
-
-        // Forward request to Durable Object
-        return stub.fetch_with_request(req).await;
+        // Limit to reasonable size (max 1000 chunks = ~16MB)
+        let chunk_count = chunk_count.min(1000);
+        
+        // Generate all key chunks
+        let total_size = chunk_count * CHUNK_SIZE;
+        let mut key_data = vec![0u8; total_size];
+        
+        getrandom::getrandom(&mut key_data).map_err(|e| {
+            Error::RustError(format!("Random generation failed: {}", e))
+        })?;
+        
+        // Return as binary response
+        let resp = Response::from_bytes(key_data)?;
+        let mut headers = Headers::new();
+        headers.set("Content-Type", "application/octet-stream")?;
+        headers.set("Access-Control-Allow-Origin", "*")?;
+        headers.set("X-Chunk-Count", &chunk_count.to_string())?;
+        headers.set("X-Chunk-Size", &CHUNK_SIZE.to_string())?;
+        
+        return Ok(resp.with_headers(headers));
     }
 
     // Route: /health - Health check

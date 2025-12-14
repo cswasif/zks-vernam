@@ -5,14 +5,5 @@ compatibility_date = "2024-01-01"
 [build]
 command = "cargo install -q worker-build && worker-build --release"
 
-[durable_objects]
-bindings = [
-  { name = "VERNAM_SESSION", class_name = "VernamSession" }
-]
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["VernamSession"]
-
 [vars]
 ENVIRONMENT = "production"
